@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import os
 from typing import Any, Callable, Dict, List, Optional, Union
 from urllib.parse import urlencode
 
@@ -15,6 +16,8 @@ from tools import utils
 from .exception import DataFetchError, IPBlockError
 from .field import SearchNoteType, SearchSortType
 from .help import get_search_id, sign
+
+from PIL import Image
 
 
 class XiaoHongShuClient(AbstractApiClient):
@@ -81,7 +84,7 @@ class XiaoHongShuClient(AbstractApiClient):
         """
         # return response.text
         return_response = kwargs.pop('return_response', False)
-
+        utils.logger.info(f"[XiaoHongShuClient.request] Begin to request {url}...")
         async with httpx.AsyncClient(proxies=self.proxies) as client:
             response = await client.request(
                 method, url, timeout=self.timeout,
@@ -96,6 +99,7 @@ class XiaoHongShuClient(AbstractApiClient):
         elif data["code"] == self.IP_ERROR_CODE:
             raise IPBlockError(self.IP_ERROR_STR)
         else:
+            print(response.text)
             raise DataFetchError(data.get("msg", None))
 
     async def get(self, uri: str, params=None) -> Dict:
@@ -483,3 +487,119 @@ class XiaoHongShuClient(AbstractApiClient):
             note_dict = transform_json_keys(state)
             return note_dict["note"]["note_detail_map"][note_id]["note"]
         raise DataFetchError(html)
+
+    async def post_comment_by_note_id(self, note_id, comment_content):
+        uri = f"/api/sns/web/v1/comment/post"
+        data = {
+            "at_users": [],
+            "content": comment_content,
+            "note_id": note_id,
+        }
+        return await self.post(uri, data=data, return_response=True)
+
+    async def pos_sns_note(self, imagePath, title, content):
+        # 判断图片路径是否存在
+        if not os.path.exists(imagePath):
+            raise FileNotFoundError(f"图片路径不存在: {imagePath}")
+               
+        # 获取oss上传信息
+        image_oss_info = await self._upload_creator_permit(imagePath)
+        utils.logger.info(f"[XiaoHongShuClient.pos_sns_note] image_oss_info: {image_oss_info}")
+        if (not image_oss_info['result']['success']):
+            raise Exception("获取图片oss上传信息失败")
+        
+        # 上传图片至oss
+        image_uploaded = await self._upload_oss_image(imagePath, image_oss_info)
+        if (not image_uploaded):
+            raise Exception("图片上传失败")
+        
+        # 发布笔记
+        publish_response = await self._publish_note(imagePath, image_oss_info, title, content)
+        utils.logger.info(f"[XiaoHongShuClient.pos_sns_note] 笔记发布成功 id: {publish_response['id']}")
+            
+    # 获取图片oss上传信息，发布笔记时会用到
+    async def _upload_creator_permit(self, imagePath):
+        # 判断图片路径是否存在
+        if not os.path.exists(imagePath):
+            raise FileNotFoundError(f"图片路径不存在: {imagePath}")
+        
+        uri = "/api/media/v1/upload/creator/permit"
+        params = {
+            "biz_name": "spectrum",
+            "scene": "image",
+            "file_count": "1",
+            "version": "1",
+            "source": "web"
+        }
+      
+        final_uri = (f"{uri}?"
+                         f"{urlencode(params)}")
+        headers = await self._pre_headers(final_uri)
+        return await self.request(method="GET", url=f"https://creator.xiaohongshu.com{final_uri}", headers=headers)
+    
+    # 上传图片到oss
+    async def _upload_oss_image(self, imagePath, oss_info)->bool:
+        uri = f"https://{oss_info['uploadTempPermits'][0]['uploadAddr']}/{oss_info['uploadTempPermits'][0]['fileIds'][0]}"
+        utils.logger.info(f"[XiaoHongShuClient._upload_oss_image] upload image url: {uri}")
+        async with httpx.AsyncClient(proxies=self.proxies) as client:
+            response = await client.request(
+                "PUT", uri, timeout=self.timeout,
+                headers={
+                    "x-cos-security-token": oss_info['uploadTempPermits'][0]['token'],
+                    "content-type": "image/jpeg"
+                },
+                data=open(imagePath, 'rb').read()
+            )
+            if response.status_code == 200:
+                utils.logger.info(f"[XiaoHongShuClient._upload_oss_image] upload image success, response header: {response.headers}")
+                return True
+            else:
+                utils.logger.error(f"[XiaoHongShuClient._upload_oss_image] upload image failed: {response.text}")
+                raise Exception(f"上传图片失败: {response.text}")
+
+    # 发布笔记
+    async def _publish_note(self, image_path, image_oss_info, title, content):
+        uri = f"/web_api/sns/v2/note"
+        image = Image.open(image_path)
+        data = {
+            "video_info": None,
+            "image_info": {
+                "images": [
+                    {
+                        "file_id": image_oss_info['uploadTempPermits'][0]['fileIds'][0],
+                        "width": image.width,
+                        "height": image.height,
+                        "metadata": {
+                            "source": -1
+                        },
+                        "stickers": {
+                            "version": 2,
+                            "floating": []
+                        },
+                        "extra_info_json": "{\"mimeType\":\"image/png\"}"
+                    }
+                ]
+            },
+            "common": {
+                "type": "normal",
+                "note_id": "",
+                "source": "{\"type\":\"web\",\"ids\":\"\",\"extraInfo\":\"{\\\"systemId\\\":\\\"web\\\"}\"}",
+                "title": title,
+                "desc": content,
+                "ats": [],
+                "hash_tag": [],
+                "business_binds": "{\"version\":1,\"noteId\":0,\"bizType\":0,\"noteOrderBind\":{},\"notePostTiming\":{},\"noteCollectionBind\":{\"id\":\"\"}}",
+                "privacy_info": {
+                    "op_type": 1,
+                    "type": 0
+                },
+                "goods_info": {}
+            }
+        }
+        # 将数据转换为 JSON 字符串
+        headers = await self._pre_headers(uri, data)
+        json_data = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+        utils.logger.info(f"[XiaoHongShuClient._publish_note] publish note data: {json_data}")
+        # headers["referer"] = "https://creator.xiaohongshu.com/"
+        utils.logger.info(f"[XiaoHongShuClient._publish_note] publish note headers: {headers}")
+        return await self.request(method="POST", url=f"https://edith.xiaohongshu.com{uri}", data=json_data, headers=headers)
