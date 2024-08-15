@@ -498,6 +498,16 @@ class XiaoHongShuClient(AbstractApiClient):
         return await self.post(uri, data=data, return_response=True)
 
     async def pos_sns_note(self, imagePath, title, content):
+        """
+        发布笔记
+        Args:
+            imagePath: 本地图片路径，目前只能传一张
+            title: 标题
+            content: 内容,支持使用#话题 
+
+        Returns:
+
+        """
         # 判断图片路径是否存在
         if not os.path.exists(imagePath):
             raise FileNotFoundError(f"图片路径不存在: {imagePath}")
