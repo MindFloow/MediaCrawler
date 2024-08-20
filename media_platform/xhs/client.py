@@ -488,13 +488,24 @@ class XiaoHongShuClient(AbstractApiClient):
             return note_dict["note"]["note_detail_map"][note_id]["note"]
         raise DataFetchError(html)
 
-    async def post_comment_by_note_id(self, note_id, comment_content):
+    async def post_comment_by_note_id(self, note_id, comment_content, target_comment_id=None):
+        """
+        发布评论
+        Args:
+            note_id: 笔记ID
+            comment_content: 评论内容
+            target_comment_id: 指定回复的评论ID
+        """
         uri = f"/api/sns/web/v1/comment/post"
         data = {
             "at_users": [],
             "content": comment_content,
             "note_id": note_id,
         }
+
+        if target_comment_id != None:
+            data["target_comment_id"] = target_comment_id
+
         return await self.post(uri, data=data, return_response=True)
 
     async def pos_sns_note(self, imagePath, title, content):
